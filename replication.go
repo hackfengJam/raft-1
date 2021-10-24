@@ -156,8 +156,10 @@ RPC:
 				deferErr.respond(fmt.Errorf("replication failed"))
 			}
 		case <-s.triggerCh:
+			// 第一次走同步
 			lastLogIdx, _ := r.getLastLog()
 			shouldStop = r.replicateTo(s, lastLogIdx)
+		// 这不是我们的心跳机制，而是确保当raft提交停止自然流动时，追随者能够快速了解领导者的提交索引。
 		// This is _not_ our heartbeat mechanism but is to ensure
 		// followers quickly learn the leader's commit index when
 		// raft commits stop flowing naturally. The actual heartbeats
@@ -217,6 +219,11 @@ START:
 	s.peerLock.RUnlock()
 
 	// Setup the request
+	r.logger.Info("3. leader 将日志实施到发送给 follower",
+		"term", r.getCurrentTerm(),
+		"follower", s.peer.ID,
+		"lastLogIndex", r.lastLogIndex,
+	)
 	if err := r.setupAppendEntries(s, &req, atomic.LoadUint64(&s.nextIndex), lastIndex); err == ErrLogNotFound {
 		goto SEND_SNAP
 	} else if err != nil {
@@ -242,6 +249,11 @@ START:
 	s.setLastContact()
 
 	// Update s based on success
+	r.logger.Info("4. leader 收到回执，来自 follower",
+		"term", r.getCurrentTerm(),
+		"follower", s.peer.ID,
+		"lastLogIndex", s.commitment.commitIndex,
+	)
 	if resp.Success {
 		// Update our replication state
 		updateLastAppended(s, &req)
@@ -250,6 +262,12 @@ START:
 		s.failures = 0
 		s.allowPipeline = true
 	} else {
+		// leader match指针退避
+		r.logger.Info("qflog. leader match指针退避 follower",
+			"term", r.getCurrentTerm(),
+			"follower", s.peer.ID,
+			"lastLogIndex", r.lastLogIndex,
+		)
 		atomic.StoreUint64(&s.nextIndex, max(min(s.nextIndex-1, resp.LastLog+1), 1))
 		if resp.NoRetryBackoff {
 			s.failures = 0
@@ -273,6 +291,7 @@ CHECK_MORE:
 
 	// Check if there are more logs to replicate
 	if atomic.LoadUint64(&s.nextIndex) <= lastIndex {
+		// 检查如果还有需要复制的日志，则 goto START
 		goto START
 	}
 	return
@@ -431,6 +450,8 @@ func (r *Raft) pipelineReplicate(s *followerReplication) error {
 	s.peerLock.RUnlock()
 
 	// Create a new pipeline
+	// 这里创建一个管道，用于接收 peer response
+	// 「respCh」<- future
 	pipeline, err := r.trans.AppendEntriesPipeline(peer.ID, peer.Address)
 	if err != nil {
 		return err
@@ -446,6 +467,7 @@ func (r *Raft) pipelineReplicate(s *followerReplication) error {
 	finishCh := make(chan struct{})
 
 	// Start a dedicated decoder
+	// ready := <-「respCh」
 	r.goFunc(func() { r.pipelineDecode(s, pipeline, stopCh, finishCh) })
 
 	// Start pipeline sends at the last good nextIndex
@@ -473,6 +495,11 @@ SEND:
 			}
 		case <-s.triggerCh:
 			lastLogIdx, _ := r.getLastLog()
+			r.logger.Info("3. leader 将日志实施到发送给 follower",
+				"term", r.getCurrentTerm(),
+				"follower", s.peer.ID,
+				"lastLogIndex", r.lastLogIndex,
+			)
 			shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
 		case <-randomTimeout(r.config().CommitTimeout):
 			lastLogIdx, _ := r.getLastLog()
@@ -499,6 +526,11 @@ func (r *Raft) pipelineSend(s *followerReplication, p AppendPipeline, nextIdx *u
 	}
 
 	// Pipeline the append entries
+	// r.logger.Info("3. leader 将日志实施到发送给 follower",
+	// 	"term", r.getCurrentTerm(),
+	// 	"follower", s.peer.ID,
+	// 	"lastLogIndex", r.lastLogIndex,
+	// )
 	if _, err := p.AppendEntries(req, new(AppendEntriesResponse)); err != nil {
 		r.logger.Error("failed to pipeline appendEntries", "peer", s.peer, "error", err)
 		return true
@@ -528,6 +560,7 @@ func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, 
 
 			// Check for a newer term, stop running
 			if resp.Term > req.Term {
+				// 如果发现任期比自己大，则 通知自己下台（角色降为 follower）；并且立即 stop running
 				r.handleStaleTerm(s)
 				return
 			}
@@ -541,6 +574,11 @@ func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, 
 			}
 
 			// Update our replication state
+			// r.logger.Info("4. leader 收到回执，来自 follower",
+			// 	"term", r.getCurrentTerm(),
+			// 	"follower", s.peer.ID,
+			// 	"lastLogIndex", s.commitment.commitIndex,
+			// )
 			updateLastAppended(s, req)
 		case <-stopCh:
 			return
@@ -554,9 +592,11 @@ func (r *Raft) setupAppendEntries(s *followerReplication, req *AppendEntriesRequ
 	req.Term = s.currentTerm
 	req.Leader = r.trans.EncodePeer(r.localID, r.localAddr)
 	req.LeaderCommitIndex = r.getCommitIndex()
+	// set 前一条日志（follower 会用来 check）
 	if err := r.setPreviousLog(req, nextIndex); err != nil {
 		return err
 	}
+	// set 新的日志
 	if err := r.setNewLogs(req, nextIndex, lastIndex); err != nil {
 		return err
 	}
@@ -624,6 +664,7 @@ func appendStats(peer string, start time.Time, logs float32) {
 func (r *Raft) handleStaleTerm(s *followerReplication) {
 	r.logger.Error("peer has newer term, stopping replication", "peer", s.peer)
 	s.notifyAll(false) // No longer leader
+	// 通知自己下台（角色降为 follower）
 	asyncNotifyCh(s.stepDown)
 }
 
