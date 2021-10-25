@@ -659,6 +659,10 @@ func (r *Raft) leaderLoop() {
 			// Process the newly committed entries
 			oldCommitIndex := r.getCommitIndex()
 			commitIndex := r.leaderState.commitment.getCommitIndex()
+			r.logger.Info("5. leader 收到 majority 成功响应日志复制请求，提交此次复制的日志",
+				"term", r.getCurrentTerm(),
+				"index", r.getCommitIndex(),
+			)
 			r.setCommitIndex(commitIndex)
 
 			// New configration has been committed, set it as the committed
@@ -1119,6 +1123,12 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
 	}
 
 	// Write the log entry locally
+	r.logger.Info(
+		"2. 先将日志写入 leader 的 log 存储区域",
+		"term", logs[0].Term,
+		"index", logs[0].Index,
+		"data", logs[0].Data,
+	)
 	if err := r.logs.StoreLogs(logs); err != nil {
 		r.logger.Error("failed to commit logs", "error", err)
 		for _, applyLog := range applyLogs {
@@ -1134,6 +1144,7 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
 
 	// Notify the replicators of the new log
 	for _, f := range r.leaderState.replState {
+		// 这里通知其他 peer
 		asyncNotifyCh(f.triggerCh)
 	}
 }
@@ -1208,6 +1219,18 @@ func (r *Raft) processLogs(index uint64, futures map[uint64]*logFuture) {
 	// If there are any remaining logs in the batch apply them
 	if len(batch) != 0 {
 		applyBatch(batch)
+	}
+
+	if r.getState() == Follower {
+		r.logger.Info("8. follower 将日志实施到状态机",
+			"term", r.getCurrentTerm(),
+			"lastLogIndex", r.lastLogIndex,
+		)
+	}else {
+		r.logger.Info("6. leader 提交了此次复制的日志后，将日志复制到状态机",
+			"term", r.getCurrentTerm(),
+			"lastLogIndex", r.lastLogIndex,
+		)
 	}
 
 	// Update the lastApplied index and term
@@ -1296,7 +1319,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	resp := &AppendEntriesResponse{
 		RPCHeader:      r.getRPCHeader(),
 		Term:           r.getCurrentTerm(),
-		LastLog:        r.getLastIndex(),
+		LastLog:        r.getLastIndex(), // leader 重试会用到
 		Success:        false,
 		NoRetryBackoff: false,
 	}
