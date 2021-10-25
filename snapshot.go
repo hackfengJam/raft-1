@@ -76,6 +76,10 @@ func (r *Raft) runSnapshots() {
 			}
 
 			// Trigger a snapshot
+			r.logger.Info("qflog. Trigger a snapshot",
+				"term", r.getCurrentTerm(),
+				"lastLogIndex", r.lastLogIndex,
+			)
 			if _, err := r.takeSnapshot(); err != nil {
 				r.logger.Error("failed to take snapshot", "error", err)
 			}

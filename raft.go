@@ -1319,7 +1319,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	resp := &AppendEntriesResponse{
 		RPCHeader:      r.getRPCHeader(),
 		Term:           r.getCurrentTerm(),
-		LastLog:        r.getLastIndex(),
+		LastLog:        r.getLastIndex(), // leader 重试会用到
 		Success:        false,
 		NoRetryBackoff: false,
 	}

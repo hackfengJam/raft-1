@@ -574,11 +574,13 @@ func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, 
 			}
 
 			// Update our replication state
-			// r.logger.Info("4. leader 收到回执，来自 follower",
-			// 	"term", r.getCurrentTerm(),
-			// 	"follower", s.peer.ID,
-			// 	"lastLogIndex", s.commitment.commitIndex,
-			// )
+			if len(req.Entries) > 0 && len(req.Entries[0].Data) > 0 {
+				r.logger.Info("4. leader 收到回执，来自 follower",
+					"term", r.getCurrentTerm(),
+					"follower", s.peer.ID,
+					"lastLogIndex", s.commitment.commitIndex,
+				)
+			}
 			updateLastAppended(s, req)
 		case <-stopCh:
 			return
